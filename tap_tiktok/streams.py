@@ -258,17 +258,31 @@ class AdsMetricsByDayStream(TikTokReportsStream):
             start_date = self.get_starting_timestamp(context)
 
             # picking up where we left off on the last run (or first run), adjust for lookback if set
-            lookback_window = self.config["lookback"]
+            lookback_window = self.config.get("lookback", 14)
             if lookback_window > 0:
                 # if lookback is configured, we want to refetch data for the entire lookback window
                 # (or as far back as the configured start date, whichever is the most recent date)
+                # Ensure start_date has timezone info
+                if start_date.tzinfo is None:
+                    start_date = start_date.replace(tzinfo=datetime.timezone.utc)
+                
+                # Parse config start_date and ensure it has timezone info
+                config_start_date = dateutil.parser.isoparse(self.config["start_date"])
+                if config_start_date.tzinfo is None:
+                    config_start_date = config_start_date.replace(tzinfo=datetime.timezone.utc)
+                
                 start_date = max(
                     min(start_date, datetime.datetime.now(tz=start_date.tzinfo) - datetime.timedelta(days=lookback_window)),
-                    dateutil.parser.isoparse(self.config["start_date"]),
+                    config_start_date,
                 )
 
+        # Ensure start_date has timezone info for consistent datetime operations
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=datetime.timezone.utc)
+            
         yesterday = datetime.datetime.now(tz=start_date.tzinfo) - datetime.timedelta(days=1)
-        end_date = min(start_date + datetime.timedelta(days=STEP_NUM_DAYS), yesterday)
+        today = datetime.datetime.now(tz=start_date.tzinfo)
+        end_date = min(start_date + datetime.timedelta(days=STEP_NUM_DAYS), today)
         params: dict = {
             "page_size": 10,
             "advertiser_id": self.config.get("advertiser_id"),
@@ -304,8 +318,17 @@ class AdsMetricsByDayStream(TikTokReportsStream):
         current_page = self._get_page_info("$.data.page_info.page", response.json()) or 0
         total_pages = self._get_page_info("$.data.page_info.total_page", response.json()) or 0
         start_date = datetime.datetime.strptime(parse_qs(urlparse(response.request.url).query)['start_date'][0],DATE_FORMAT)
+        
+        # Ensure start_date has timezone info
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=datetime.timezone.utc)
+            
         yesterday = datetime.datetime.now(tz=start_date.tzinfo) - datetime.timedelta(days=1)
         end_date = datetime.datetime.strptime(parse_qs(urlparse(response.request.url).query)['end_date'][0], DATE_FORMAT)
+        
+        # Ensure end_date has timezone info to match yesterday
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=datetime.timezone.utc)
         if current_page < total_pages:
             return {
                 "page": current_page + 1,
@@ -317,6 +340,35 @@ class AdsMetricsByDayStream(TikTokReportsStream):
                 "start_date": min(end_date + datetime.timedelta(days=1), yesterday).strftime(DATE_FORMAT)
             }
         return None
+
+    def request_records(self, context: Optional[dict]) -> Iterable[dict]:
+        """Request records, advancing through date windows even when a window returns 0 records.
+
+        The default Singer SDK RESTStream stops pagination when the last response has no
+        records. TikTok often returns empty for early date windows; we must keep advancing
+        (start_date/end_date) until we've covered the range or get_next_page_token returns None.
+        """
+        next_page_token: Any = None
+        finished = False
+        decorated_request = self.request_decorator(self._request)
+
+        while not finished:
+            prepared_request = self.prepare_request(
+                context, next_page_token=next_page_token
+            )
+            resp = decorated_request(prepared_request, context)
+            for row in self.parse_response(resp):
+                yield row
+            previous_token = copy.deepcopy(next_page_token)
+            next_page_token = self.get_next_page_token(
+                response=resp, previous_token=previous_token
+            )
+            if next_page_token and next_page_token == previous_token:
+                raise RuntimeError(
+                    "Loop detected in pagination. "
+                    "Pagination token is identical to prior token."
+                )
+            finished = not next_page_token
 
 
 class CampaignMetricsByDayStream(AdsMetricsByDayStream):

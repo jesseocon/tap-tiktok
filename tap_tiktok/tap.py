@@ -65,6 +65,12 @@ class TapTikTok(Tap):
             description="Advertiser ID"
         ),
         th.Property(
+            "advertiser_ids",
+            th.StringType,
+            required=False,
+            description="Comma-separated list of advertiser IDs (overrides advertiser_id if set)"
+        ),
+        th.Property(
             "start_date",
             th.DateTimeType,
             description="The earliest record date to sync"
@@ -78,10 +84,16 @@ class TapTikTok(Tap):
         th.Property(
             "lookback",
             th.IntegerType,
-            default=0,
+            default=14,
             description="The number of days of data to reload from the current date (ignored if current state of the extractor has a start date earlier than the current date minus number of lookback days)"
         )
     ).to_dict()
+
+    @property
+    def advertiser_id_list(self):
+        if self.config.get("advertiser_ids"):
+            return [x.strip() for x in self.config["advertiser_ids"].split(",") if x.strip()]
+        return [self.config["advertiser_id"]]
 
     def discover_streams(self) -> List[Stream]:
         """Return a list of discovered streams."""
