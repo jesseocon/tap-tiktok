@@ -2,7 +2,7 @@
 
 import json
 import requests
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from singer_sdk.helpers.jsonpath import extract_jsonpath
 from singer_sdk.streams import RESTStream
@@ -10,11 +10,41 @@ from singer_sdk.streams import RESTStream
 DATE_FORMAT = "%Y-%m-%d"
 
 
+def resolve_advertiser_ids(config: dict) -> List[str]:
+    """Resolve the list of advertiser IDs to sync from tap config.
+
+    Prefers the comma-separated `advertiser_ids` config. Falls back to the
+    legacy `advertiser_id` field for backwards compatibility. Whitespace
+    around each ID is stripped and empty entries are dropped.
+    """
+    raw_ids = config.get("advertiser_ids")
+    if raw_ids:
+        ids = [x.strip() for x in str(raw_ids).split(",") if x.strip()]
+        if ids:
+            return ids
+
+    legacy_id = config.get("advertiser_id")
+    if legacy_id:
+        trimmed = str(legacy_id).strip()
+        if trimmed:
+            return [trimmed]
+
+    return []
+
+
 class TikTokStream(RESTStream):
 
     url_base = "https://business-api.tiktok.com/open_api/v1.3"
 
     records_jsonpath = "$.data.list[*]"
+
+    @property
+    def partitions(self) -> Optional[List[dict]]:
+        """Fan out one request per configured advertiser ID."""
+        return [
+            {"advertiser_id": advertiser_id}
+            for advertiser_id in resolve_advertiser_ids(self.config)
+        ]
 
     @property
     def http_headers(self) -> dict:
@@ -25,6 +55,22 @@ class TikTokStream(RESTStream):
         headers["Content-Type"] = "application/json"
         headers["Access-Token"] = self.config["access_token"].__str__()
         return headers
+
+    def _advertiser_id_for(self, context: Optional[dict]) -> str:
+        """Return the advertiser_id for the current partition context.
+
+        Falls back to the first resolved advertiser ID when no context is
+        provided (e.g. during discovery or ad-hoc invocations).
+        """
+        if context and context.get("advertiser_id"):
+            return context["advertiser_id"]
+        ids = resolve_advertiser_ids(self.config)
+        if not ids:
+            raise ValueError(
+                "tap-tiktok requires either `advertiser_ids` (comma-separated) "
+                "or the legacy `advertiser_id` config to be set."
+            )
+        return ids[0]
 
     @staticmethod
     def _get_page_info(json_path, json):
@@ -45,7 +91,7 @@ class TikTokStream(RESTStream):
         self, context: Optional[dict], next_page_token: Optional[Any]
     ) -> Dict[str, Any]:
         """Return a dictionary of values to be used in URL parameterization."""
-        params: dict = {"advertiser_id": self.config["advertiser_id"]}
+        params: dict = {"advertiser_id": self._advertiser_id_for(context)}
         if next_page_token:
             params["page"] = next_page_token
         params["filtering"] = json.dumps({"primary_status": "STATUS_ALL" if self.config.get("include_deleted") else "STATUS_NOT_DELETE"})
@@ -61,7 +107,9 @@ class TikTokReportsStream(TikTokStream):
     next_page_token_jsonpath = "$.page_info.page"
 
     def post_process(self, row: dict, context: Optional[dict] = None) -> Optional[dict]:
-        return {**row['dimensions'], **row['metrics']}
+        record = {**row["dimensions"], **row["metrics"]}
+        record["advertiser_id"] = self._advertiser_id_for(context)
+        return record
 
     def get_next_page_token(
         self, response: requests.Response, previous_token: Optional[Any]

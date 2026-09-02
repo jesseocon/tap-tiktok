@@ -15,7 +15,8 @@ pipx install git+https://github.com/gthsheep/tap-tiktok
 ### Accepted Config Options
 
 `access_token` - Access Token for the API as obtained via the authentication process described below.  
-`advertiser_id` - Advertiser ID for your TikTok account.  
+`advertiser_id` - Single Advertiser ID for your TikTok account. Kept for backwards compatibility; prefer `advertiser_ids` when syncing more than one account.  
+`advertiser_ids` - Comma-separated list of Advertiser IDs to sync (e.g. `"1234567, 8901234, 5678901"`). Whitespace around each ID is trimmed. Takes precedence over `advertiser_id` when both are set.  
 `start_date` - Start date as of when to start collecting metrics, e.g. `2022-01-01T00:00:00Z`  
 `lookback` - Number of days prior to the current date for which data should be refetched (default `0`)
 
